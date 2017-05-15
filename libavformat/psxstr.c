@@ -94,6 +94,14 @@ static int str_probe(const AVProbeData *p)
 
         switch (sector[0x12] & CDXA_TYPE_MASK) {
         case CDXA_TYPE_DATA:
+                if (memcmp(&sector[0x18], "DPS", 3) == 0 &&
+                    AV_RL16(&sector[0x28]) == 320 &&
+                    AV_RL16(&sector[0x2A]) >= 160 &&
+                    AV_RL32(&sector[0x34]) != 0) {
+
+                    vid++;
+                    break;
+                }
         case CDXA_TYPE_VIDEO: {
                 int current_sector = AV_RL16(&sector[0x1C]);
                 int sector_count   = AV_RL16(&sector[0x1E]);
