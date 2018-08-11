@@ -94,6 +94,10 @@ static int threedostr_read_header(AVFormatContext *s)
     }
 
     switch (codec) {
+    case MKTAG('N','O','N','E'):
+        st->codecpar->codec_id    = AV_CODEC_ID_PCM_S16BE;
+        st->codecpar->block_align = 2 * st->codecpar->channels;
+        break;
     case MKTAG('S','D','X','2'):
         st->codecpar->codec_id    = AV_CODEC_ID_SDX2_DPCM;
         st->codecpar->block_align = 1 * st->codecpar->channels;
