@@ -22,7 +22,15 @@
 #include "avformat.h"
 #include "internal.h"
 
-static int threedostr_probe(const AVProbeData *p)
+#define BASE_FREQ 240
+
+typedef struct ThreedoDemuxContext {
+    int audio_stream_index;
+    int video_stream_index;
+    int video_frames_count;
+} ThreedoDemuxContext;
+
+static int threedostr_probe(AVProbeData *p)
 {
     if (memcmp(p->buf, "CTRL", 4) &&
         memcmp(p->buf, "SHDR", 4) &&
@@ -34,10 +42,14 @@ static int threedostr_probe(const AVProbeData *p)
 
 static int threedostr_read_header(AVFormatContext *s)
 {
-    unsigned chunk, codec = 0, size, ctrl_size = -1, found_shdr = 0;
-    AVStream *st;
+    ThreedoDemuxContext *ctx = s->priv_data;
+    unsigned chunk, codec = 0, vcodec, size, ctrl_size = -1, found_shdr = 0, found_fhdr = 0;
+    AVStream *st = 0, *st2;
 
-    while (!avio_feof(s->pb) && !found_shdr) {
+    ctx->audio_stream_index = -1;
+    ctx->video_stream_index = -1;
+
+    while (!avio_feof(s->pb) && (found_shdr + found_fhdr) < 2) {
         chunk = avio_rl32(s->pb);
         size  = avio_rb32(s->pb);
 
@@ -50,6 +62,13 @@ static int threedostr_read_header(AVFormatContext *s)
             ctrl_size = size;
             break;
         case MKTAG('S','N','D','S'):
+            if (found_shdr) {
+                ++found_shdr;
+                // audio only stream, rewind to beginning of the chunk
+                avio_seek(s->pb, -8, SEEK_CUR);
+                size = 0;
+                break;
+            }
             if (size < 56)
                 return AVERROR_INVALIDDATA;
             avio_skip(s->pb, 8);
@@ -61,6 +80,7 @@ static int threedostr_read_header(AVFormatContext *s)
             if (!st)
                 return AVERROR(ENOMEM);
 
+            ctx->audio_stream_index   = st->index;
             st->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
             st->codecpar->sample_rate = avio_rb32(s->pb);
             st->codecpar->channels    = avio_rb32(s->pb);
@@ -85,6 +105,47 @@ static int threedostr_read_header(AVFormatContext *s)
                 }
             }
             break;
+        case MKTAG('F','I','L','M'):
+            if (found_fhdr) {
+                ++found_fhdr;
+                // video only stream, rewind to beginning of the chunk
+                avio_seek(s->pb, -8, SEEK_CUR);
+                size = 0;
+                break;
+            }
+            if (size < 28)
+                return AVERROR_INVALIDDATA;
+            avio_skip(s->pb, 8);
+            if (avio_rl32(s->pb) != MKTAG('F','H','D','R'))
+                return AVERROR_INVALIDDATA;
+            avio_skip(s->pb, 4);
+
+            vcodec = avio_rl32(s->pb);
+            if (vcodec != MKTAG('c','v','i','d')) {
+                av_log(s, AV_LOG_WARNING, "unexpected video codec %X\n", vcodec);
+                break;
+            }
+
+            st2 = avformat_new_stream(s, NULL);
+            if (!st2)
+                return AVERROR(ENOMEM);
+
+            ctx->video_stream_index   = st2->index;
+            st2->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            st2->codecpar->codec_id   = AV_CODEC_ID_CINEPAK;
+            st2->codecpar->codec_tag  = 0; /* no fourcc */
+            st2->codecpar->height     = avio_rb32(s->pb);
+            st2->codecpar->width      = avio_rb32(s->pb);
+            avio_skip(s->pb, 4);
+            ctx->video_frames_count   = avio_rb32(s->pb);
+
+            avpriv_set_pts_info(st2, 33, 1, BASE_FREQ);
+
+            size -= 36;
+            found_fhdr = 1;
+            break;
+        case MKTAG('F','I','L','L'):
+            break;
         default:
             av_log(s, AV_LOG_DEBUG, "skipping unknown chunk: %X\n", chunk);
             break;
@@ -92,6 +153,9 @@ static int threedostr_read_header(AVFormatContext *s)
 
         avio_skip(s->pb, size);
     }
+
+    if (!st)
+        return 0;
 
     switch (codec) {
     case MKTAG('N','O','N','E'):
@@ -114,12 +178,12 @@ static int threedostr_read_header(AVFormatContext *s)
 
 static int threedostr_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
-    unsigned chunk, size, found_ssmp = 0;
-    AVStream *st = s->streams[0];
-    int64_t pos;
+    ThreedoDemuxContext *ctx = s->priv_data;
+    unsigned chunk, size, found_ssmp = 0, found_frme = 0, frme_size;
+    int64_t pos, pts;
     int ret = 0;
 
-    while (!found_ssmp) {
+    while (!found_ssmp && !found_frme) {
         if (avio_feof(s->pb))
             return AVERROR_EOF;
 
@@ -136,6 +200,8 @@ static int threedostr_read_packet(AVFormatContext *s, AVPacket *pkt)
 
         switch (chunk) {
         case MKTAG('S','N','D','S'):
+            if (ctx->audio_stream_index < 0)
+                break;
             if (size <= 16)
                 return AVERROR_INVALIDDATA;
             avio_skip(s->pb, 8);
@@ -145,10 +211,31 @@ static int threedostr_read_packet(AVFormatContext *s, AVPacket *pkt)
             size -= 16;
             ret = av_get_packet(s->pb, pkt, size);
             pkt->pos = pos;
-            pkt->stream_index = 0;
-            pkt->duration = size / st->codecpar->channels;
+            pkt->stream_index = ctx->audio_stream_index;
+            pkt->duration = size / s->streams[ctx->audio_stream_index]->codecpar->channels;
             size = 0;
             found_ssmp = 1;
+            break;
+        case MKTAG('F','I','L','M'):
+            if (ctx->video_stream_index < 0)
+                break;
+            if (size <= 20)
+                return AVERROR_INVALIDDATA;
+            pts = avio_rb32(s->pb);
+            avio_skip(s->pb, 4);
+            if (avio_rl32(s->pb) != MKTAG('F','R','M','E'))
+                return AVERROR_INVALIDDATA;
+            avio_skip(s->pb, 4); // duration
+            frme_size = avio_rb32(s->pb);
+            size -= 20;
+            if (frme_size > size)
+                return AVERROR_INVALIDDATA;
+            ret = av_get_packet(s->pb, pkt, frme_size);
+            pkt->pos = pos;
+            pkt->stream_index = ctx->video_stream_index;
+            pkt->pts = pts;
+            size -= frme_size;
+            found_frme = 1;
             break;
         default:
             av_log(s, AV_LOG_DEBUG, "skipping unknown chunk: %X\n", chunk);
@@ -164,9 +251,10 @@ static int threedostr_read_packet(AVFormatContext *s, AVPacket *pkt)
 AVInputFormat ff_threedostr_demuxer = {
     .name           = "3dostr",
     .long_name      = NULL_IF_CONFIG_SMALL("3DO STR"),
+    .priv_data_size = sizeof(ThreedoDemuxContext),
     .read_probe     = threedostr_probe,
     .read_header    = threedostr_read_header,
     .read_packet    = threedostr_read_packet,
-    .extensions     = "str",
+    .extensions     = "str,cpk,cpc",
     .flags          = AVFMT_GENERIC_INDEX,
 };
