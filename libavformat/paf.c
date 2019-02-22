@@ -155,7 +155,7 @@ static int read_header(AVFormatContext *s)
     p->video_size  = p->max_video_blks * p->buffer_size;
     p->video_frame = av_mallocz(p->video_size);
 
-    p->audio_size       = p->max_audio_blks * p->buffer_size;
+    p->audio_size       = (p->max_audio_blks - 1) * p->buffer_size;
     p->audio_frame      = av_mallocz(p->audio_size);
     p->temp_audio_frame = av_mallocz(p->audio_size);
 
@@ -226,7 +226,7 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
                 return AVERROR_INVALIDDATA;
 
             avio_read(pb, p->audio_frame + offset, p->buffer_size);
-            if (offset == (p->max_audio_blks - 2) * p->buffer_size) {
+            if (offset + p->buffer_size == p->audio_size) {
                 memcpy(p->temp_audio_frame, p->audio_frame, p->audio_size);
                 p->got_audio = 1;
             }
