@@ -92,7 +92,7 @@ static int read_header(AVFormatContext *s)
     PAFDemuxContext *p  = s->priv_data;
     AVIOContext     *pb = s->pb;
     AVStream        *ast, *vst;
-    int ret = 0;
+    int frame_ms, ret = 0;
 
     avio_skip(pb, 132);
 
@@ -104,7 +104,9 @@ static int read_header(AVFormatContext *s)
     vst->nb_frames  =
     vst->duration   =
     p->nb_frames    = avio_rl32(pb);
-    avio_skip(pb, 4);
+    frame_ms        = avio_rl32(pb);
+    if (frame_ms < 1)
+        return AVERROR_INVALIDDATA;
 
     vst->codecpar->width  = avio_rl32(pb);
     vst->codecpar->height = avio_rl32(pb);
@@ -113,7 +115,7 @@ static int read_header(AVFormatContext *s)
     vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     vst->codecpar->codec_tag  = 0;
     vst->codecpar->codec_id   = AV_CODEC_ID_PAF_VIDEO;
-    avpriv_set_pts_info(vst, 64, 1, 10);
+    avpriv_set_pts_info(vst, 64, 1, 1000 / frame_ms);
 
     ast = avformat_new_stream(s, 0);
     if (!ast)
