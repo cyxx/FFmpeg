@@ -218,8 +218,10 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
     if (avio_feof(pb))
         return AVERROR_EOF;
 
-    count = (p->current_frame == 0) ? p->preload_count
-                                    : p->blocks_count_table[p->current_frame - 1];
+    count = p->blocks_count_table[p->current_frame];
+    if (p->current_frame == 0)
+        count += p->preload_count;
+
     for (i = 0; i < count; i++) {
         if (p->current_frame_block >= p->frame_blks)
             return AVERROR_INVALIDDATA;
