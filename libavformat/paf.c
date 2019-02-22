@@ -47,7 +47,9 @@ typedef struct PAFDemuxContext {
     int video_size;
 
     uint8_t  *audio_frame;
+    int audio_frame_size;
     uint8_t  *temp_audio_frame;
+    int temp_audio_frame_size;
     int audio_size;
 
     int got_audio;
@@ -175,6 +177,8 @@ static int read_header(AVFormatContext *s)
     read_table(s, p->frames_offset_table, p->nb_frames);
     read_table(s, p->blocks_offset_table, p->frame_blks);
 
+    p->audio_frame_size = 0;
+    p->temp_audio_frame_size = 0;
     p->got_audio = 0;
     p->current_frame = 0;
     p->current_frame_block = 0;
@@ -196,23 +200,23 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
     uint32_t        count, offset;
     int             size, i, ret;
 
-    if (p->current_frame >= p->nb_frames)
-        return AVERROR_EOF;
-
-    if (avio_feof(pb))
-        return AVERROR_EOF;
-
     if (p->got_audio) {
-        if ((ret = av_new_packet(pkt, p->audio_size)) < 0)
+        if ((ret = av_new_packet(pkt, p->temp_audio_frame_size)) < 0)
             return ret;
 
-        memcpy(pkt->data, p->temp_audio_frame, p->audio_size);
-        pkt->duration     = PAF_SOUND_SAMPLES * (p->audio_size / PAF_SOUND_FRAME_SIZE);
+        memcpy(pkt->data, p->temp_audio_frame, p->temp_audio_frame_size);
+        pkt->duration     = PAF_SOUND_SAMPLES * (p->temp_audio_frame_size / PAF_SOUND_FRAME_SIZE);
         pkt->flags       |= AV_PKT_FLAG_KEY;
         pkt->stream_index = 1;
         p->got_audio      = 0;
         return pkt->size;
     }
+
+    if (p->current_frame >= p->nb_frames)
+        return AVERROR_EOF;
+
+    if (avio_feof(pb))
+        return AVERROR_EOF;
 
     count = (p->current_frame == 0) ? p->preload_count
                                     : p->blocks_count_table[p->current_frame - 1];
@@ -226,8 +230,10 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
                 return AVERROR_INVALIDDATA;
 
             avio_read(pb, p->audio_frame + offset, p->buffer_size);
-            if (offset + p->buffer_size == p->audio_size) {
+            p->audio_frame_size = offset + p->buffer_size;
+            if (p->audio_frame_size == p->audio_size) {
                 memcpy(p->temp_audio_frame, p->audio_frame, p->audio_size);
+                p->temp_audio_frame_size = p->audio_size;
                 p->got_audio = 1;
             }
         } else {
@@ -237,6 +243,14 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
             avio_read(pb, p->video_frame + offset, p->buffer_size);
         }
         p->current_frame_block++;
+    }
+
+    if (p->current_frame == p->nb_frames - 1 &&
+        p->audio_frame_size != 0 &&
+        p->audio_frame_size != p->audio_size) {
+        memcpy(p->temp_audio_frame, p->audio_frame, p->audio_frame_size);
+        p->temp_audio_frame_size = p->audio_frame_size;
+        p->got_audio = 1;
     }
 
     if (p->frames_offset_table[p->current_frame] >= p->video_size)
